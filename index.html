@@ -215,7 +215,7 @@
     <div class="camara-arriba">
       <button class="chip" id="btnAuto">⚡ Auto</button>
       <button class="chip" id="btnLuz">🔦 Luz</button>
-      <button class="chip" id="btnHD" title="Fotos con la máxima resolución de la cámara">HD</button>
+      <button class="chip" id="btnHD" title="Máxima resolución: más lenta, no te muevas">HD</button>
     </div>
     <div class="camara-estado" id="camaraEstado">Buscando la hoja…</div>
   </div>
@@ -393,7 +393,11 @@
       var g = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000 | 0;
       gris[i] = g; hist[g]++;
     }
-    var fallo = { ok: false, esquinas: copiaEsquinas(TODA), firma: firmaDe(gris, w, h) };
+    // nitidez: cuánto cambian los pixeles vecinos (una foto movida da un número más bajo)
+    var nit = 0;
+    for (i = w + 1; i < n; i++) nit += Math.abs(gris[i] - gris[i - 1]) + Math.abs(gris[i] - gris[i - w]);
+    nit /= n;
+    var fallo = { ok: false, esquinas: copiaEsquinas(TODA), firma: firmaDe(gris, w, h), nitidez: nit };
     // Umbral de Otsu
     var total = 0; for (i = 0; i < 256; i++) total += i * hist[i];
     var sumB = 0, wB = 0, mejor = 0, umbral = 128, mediaClara = 0, mediaOscura = 0;
@@ -436,9 +440,9 @@
     for (i = 0; i < 4; i++) { var a = q[i], b = q[(i + 1) % 4]; area += a[0] * b[1] - b[0] * a[1]; }
     area = Math.abs(area) / 2;
     var proporcion = area / n, relleno = mayor / Math.max(area, 1);
-    if (proporcion > 0.93) return { ok: false, completa: true, esquinas: copiaEsquinas(TODA), firma: fallo.firma };
+    if (proporcion > 0.93) return { ok: false, completa: true, esquinas: copiaEsquinas(TODA), firma: fallo.firma, nitidez: nit };
     if (proporcion < 0.12 || relleno < 0.8) return fallo;
-    return { ok: true, firma: fallo.firma,
+    return { ok: true, firma: fallo.firma, nitidez: nit,
              esquinas: q.map(function (p) { return [(p[0] + 0.5) / w, (p[1] + 0.5) / h]; }) };
   }
   // "Huella" pequeña de la imagen para saber si la cámara se movió o cambió la hoja.
@@ -710,7 +714,7 @@
 
   // ================== Cámara ==================
   var flujo = null, capturador = null, bloqueo = null, luz = false, capturando = false;
-  var usarHD = leerLocal('esc_hd') !== 'no';
+  var usarHD = leerLocal('esc_hd2') === 'si'; // la foto HD tarda y puede salir movida
   var modoAuto = leerLocal('esc_auto') !== 'no';
   var camaraEnVivo = window.isSecureContext && location.protocol !== 'file:' &&
                      !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
@@ -807,10 +811,11 @@
   // por casi un segundo, toma la foto sola. Después espera a que cambies de hoja.
   var ciclo = null, anterior = null, firmaAnterior = null, firmaCaptura = null;
   var quietos = 0, armado = true, ultimaCaptura = 0, ultimoResultado = null;
-  var QUIETOS_PARA_DISPARAR = 5;
+  var QUIETOS_PARA_DISPARAR = 4; // 4 revisiones de 150 ms ≈ medio segundo quieto
+  var historialNitidez = [];
 
-  function reiniciarAuto() { anterior = null; firmaAnterior = null; firmaCaptura = null; quietos = 0; armado = true; }
-  function iniciarCiclo() { detenerCiclo(); ciclo = setInterval(revisarCuadro, 200); }
+  function reiniciarAuto() { historialNitidez = []; anterior = null; firmaAnterior = null; firmaCaptura = null; quietos = 0; armado = true; }
+  function iniciarCiclo() { detenerCiclo(); ciclo = setInterval(revisarCuadro, 150); }
   function detenerCiclo() { if (ciclo) clearInterval(ciclo); ciclo = null; limpiarMarco(); }
   function despuesDeCaptura() {
     ultimaCaptura = Date.now();
@@ -830,7 +835,10 @@
     if (!armado && diferencia(r.firma, firmaCaptura) > 14) armado = true;
 
     var mismoLugar = r.ok && anterior && r.esquinas.every(function (q, k) { return dist(q, anterior[k]) < 0.03; });
-    if (r.ok && mismoLugar && mov < 5) quietos++; else quietos = 0;
+    historialNitidez.push(r.nitidez); if (historialNitidez.length > 20) historialNitidez.shift();
+    var mejorNitidez = Math.max.apply(null, historialNitidez);
+    var nitida = r.nitidez >= mejorNitidez * 0.85;
+    if (r.ok && mismoLugar && mov < 5 && nitida) quietos++; else quietos = 0;
     anterior = r.ok ? r.esquinas : null;
 
     var progreso = Math.min(quietos / QUIETOS_PARA_DISPARAR, 1);
@@ -840,7 +848,7 @@
     if (!armado) { estado('✔ Lista · pon la siguiente hoja'); return; }
     if (!r.ok) { estado(r.completa ? 'Aléjate un poco para ver toda la hoja' : 'Buscando la hoja…'); return; }
     if (quietos < QUIETOS_PARA_DISPARAR) { estado('No te muevas…'); return; }
-    if (Date.now() - ultimaCaptura < 1200) return;
+    if (Date.now() - ultimaCaptura < 900) return;
     estado('📸');
     disparar();
   }
@@ -887,7 +895,7 @@
     reiniciarAuto();
   };
   $('btnHD').onclick = function () {
-    usarHD = !usarHD; guardarLocal('esc_hd', usarHD ? 'si' : 'no');
+    usarHD = !usarHD; guardarLocal('esc_hd2', usarHD ? 'si' : 'no');
     this.classList.toggle('activo', usarHD);
   };
   $('btnLuz').onclick = function () {
@@ -1066,7 +1074,7 @@
   // ================== PDF ==================
   function nombrePorDefecto() {
     var d = new Date(), z = function (x) { return (x < 10 ? '0' : '') + x; };
-    return 'Escaneo ' + z(d.getDate()) + '-' + z(d.getMonth() + 1) + '-' + d.getFullYear() + ' ' + z(d.getHours()) + z(d.getMinutes());
+    return 'Escaneo_' + z(d.getDate()) + '-' + z(d.getMonth() + 1) + '-' + d.getFullYear() + '_' + z(d.getHours()) + z(d.getMinutes());
   }
 
   // Arma un PDF a mano con las fotos JPEG (sin librerías externas).
@@ -1126,7 +1134,10 @@
   $('pdfCrear').onclick = function () {
     var btn = this; btn.disabled = true;
     var calidad = $('pdfCalidad').value;
-    var nombre = ($('pdfNombre').value.trim() || nombrePorDefecto()).replace(/[\\/:*?"<>|]+/g, '-');
+    // Chrome rechaza algunos nombres al enviar: solo letras, números, guion y guion bajo
+    var nombre = ($('pdfNombre').value.trim() || nombrePorDefecto())
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'Escaneo';
     $('pdfEstado').textContent = 'Terminando de procesar las páginas…';
     cola.then(function () {
       var lista = paginas.filter(function (p) { return p.out; }), res = [], i = 0;
@@ -1151,17 +1162,23 @@
   };
   $('pdfCompartir').onclick = function () {
     if (!archivoPdf) return;
-    navigator.share({ files: [archivoPdf], title: archivoPdf.name }).catch(function (e) {
-      if (e.name !== 'AbortError') $('pdfEstado').textContent = 'No se pudo enviar: ' + e.message + '. Usa “Guardar en el teléfono”.';
+    navigator.share({ files: [archivoPdf] }).catch(function (e) {
+      if (e.name === 'AbortError') return;
+      descargar();
+      $('pdfEstado').innerHTML = 'Este teléfono no dejó enviarlo directo, así que se <b>guardó en Descargas</b> como “' +
+        archivoPdf.name + '”. Para mandarlo: en WhatsApp toca 📎 → Documento y búscalo ahí.';
     });
   };
   $('pdfDescargar').onclick = function () {
     if (!archivoPdf) return;
+    descargar();
+    $('pdfEstado').textContent = 'Guardado en Descargas como “' + archivoPdf.name + '”.';
+  };
+  function descargar() {
     var url = URL.createObjectURL(archivoPdf), a = document.createElement('a');
     a.href = url; a.download = archivoPdf.name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
-    $('pdfEstado').textContent = 'Guardado en Descargas como “' + archivoPdf.name + '”.';
-  };
+  }
   $('pdfNuevo').onclick = function () {
     if (!confirm('¿Borrar todas las páginas para empezar otro escaneo?')) return;
     paginas.forEach(function (p) {
